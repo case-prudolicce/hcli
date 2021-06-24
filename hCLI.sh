@@ -1,0 +1,690 @@
+#HCLI: A cli based API wrapper for https://habitica.com
+#Made by Jérémie Simard
+
+
+# Add a file to $HOME/.config/hcli/ that contains the following details:
+# KEY="<Your api key>"
+# USERID="<your user id>"
+# Tip: they can be found in your settings page
+NAME="hcli"
+VER="alpha-1.0.0"
+ST="->" #Streak token
+
+if [ ! "$1" == "--init" ];then
+	source "$HOME/.config/hcli/secret" 
+fi
+
+itemsq="members/$USERID"
+addtaskq="tasks/user"
+contentq="content"
+cronq="cron"
+#called when installed to write api keys
+hcliInit() {
+	read -p "API KEY: " apk
+	read -p "USERID: " uid
+	mkdir -p $HOME/.config/hcli/
+	mkdir -p $HOME/.cache/hcli/
+	[ ! "$apk" == "SKIP" ] && echo "KEY=\"$apk\"" > $HOME/.config/hcli/secret
+	[ ! "$uid" == "SKIP" ] && echo "USERID=\"$uid\"" >> $HOME/.config/hcli/secret
+	source "$HOME/.config/hcli/secret" 
+	itemsq="members/$USERID"
+	echo "Initializing" && refresh daily -q && refresh user -q && refresh habit -q && refresh todo -q && refresh reward -q
+	echo "Wrote to $HOME/.config/hcli/secret and $HOME/.cache/hcli/"
+}
+
+makeDeleteTaskq(){
+	echo "tasks/$1"
+}
+makeCastSpellq(){
+	if [ "$1" = "" ]; then exit;fi
+	string="user/class/cast/$1"
+	if [ ! "$2" = "" ]; then string+="?targetId=$2";fi
+	echo $string
+}
+addstats(){
+	if [ ! -z "$1" ]; then if [ ! -z "$2" ]; then
+		one=$1
+		two=$2
+		
+		echo "$(echo `echo $one | awk 'BEGIN { FS = "~" } ; { print $1 }'` + `echo $two | awk 'BEGIN { FS = "~" } ; { print $1 }'` | bc)~$(echo `echo $one | awk 'BEGIN { FS = "~" } ; { print $2 }'` + `echo $two | awk 'BEGIN { FS = "~" } ; { print $2 }'` | bc)~$(echo `echo $one | awk 'BEGIN { FS = "~" } ; { print $3 }'` + `echo $two | awk 'BEGIN { FS = "~" } ; { print $3 }'` | bc)~$(echo `echo $one | awk 'BEGIN { FS = "~" } ; { print $4 }'` + `echo $two | awk 'BEGIN { FS = "~" } ; { print $4 }'` | bc)~"
+	fi;
+	else
+		echo Wrong Usage
+	fi
+}
+GetTargetId() {
+	tasks=`displayTodos -i && displayHabits -i && displayDailys -i`
+	name=()
+	items=()
+	IFS=
+	for l in $tasks; do
+		items+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 "~" $2 "~" $3}' | sed 's/"//g')"
+		name+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 }' | sed 's/"//g')"
+	done
+	IFS=' '
+	toget="$(echo $name | fzf)"
+	[ "$toget" = "" ] && echo Canceled && exit 0
+	toget="$(echo $toget | sed 's/\[/\\\[/ ; s/\]/\\\]/')"
+	id="$(echo $items | grep -w "$toget" | awk 'BEGIN { FS = "~" } ; { print $2"~"$3 }')"
+	echo $id
+}
+summary(){ displayUser A && echo && displayDailys -a && echo && displayHabits && echo && displayTodos; }
+deleteTask() { 
+	t=`GetTargetId`
+	tid=`echo $t | awk 'BEGIN { FS="~" } ; { print $1 }'` && query `makeDeleteTaskq "$tid"` "DELETE" > /dev/null;
+	refresh `echo $t | awk 'BEGIN { FS="~" } ; { print $2 }'`
+}
+allocateStats(){
+	read -p "STR: " str
+	read -p "CON: " con
+	read -p "INT: " int
+	read -p "PER: " per
+	d="{ \"stats\": { \"int\": $int, \"str\": $str, \"con\": $con, \"per\": $per } }"
+	query `userq '/allocate-bulk'` "POST" "$d"
+}
+refresh(){
+	[ ! "$2" = "-q" ] && echo Refreshing
+	if [ "$1" = "daily" ]; then
+		rm $HOME/.cache/hcli/cached_dailysSet_response 2> /dev/null
+		rm $HOME/.cache/hcli/cached_dailys 2> /dev/null
+		query `makeTaskq dailys` "GET" > $HOME/.cache/hcli/cached_dailys
+		rm $HOME/.cache/hcli/parsed_dailys 2> /dev/null
+		parseCache daily
+	elif [ "$1" = "todo" ]; then
+		rm $HOME/.cache/hcli/cached_todosSet_response 2> /dev/null
+		rm $HOME/.cache/hcli/cached_todos 2> /dev/null
+		query `makeTaskq todos` "GET" > $HOME/.cache/hcli/cached_todos
+		rm $HOME/.cache/hcli/parsed_todo 2> /dev/null
+		parseCache todo
+	elif [ "$1" = "habit" ]; then
+		rm $HOME/.cache/hcli/cached_habitsSet_response 2> /dev/null
+		rm $HOME/.cache/hcli/cached_habits 2> /dev/null
+		query `makeTaskq habits` "GET" > $HOME/.cache/hcli/cached_habits
+		rm $HOME/.cache/hcli/parsed_habit 2> /dev/null
+		parseCache habit
+	elif [ "$1" = "user" ]; then
+		rm $HOME/.cache/hcli/cached_user #2> /dev/null 
+		rm $HOME/.cache/hcli/cached_items #2> /dev/null 
+		rm $HOME/.cache/hcli/cached_content #2> /dev/null 
+		query $itemsq "GET" > $HOME/.cache/hcli/cached_items
+		query $contentq "GET" > $HOME/.cache/hcli/cached_content
+		query `userq '?userFields=stats'` "GET" > $HOME/.cache/hcli/cached_user
+		rm $HOME/.cache/hcli/parsed_content 2> /dev/null
+		rm $HOME/.cache/hcli/parsed_user 2> /dev/null
+		parseCache inventory
+		parseCache user
+	elif [ "$1" = "reward" ]; then
+		[ ! "$2" == "-q" ] && echo TBD
+	fi
+}
+makeTaskq(){ echo "tasks/user?type=$1"; }
+userq() { echo user$1; }
+makeScoreq(){
+	if [ "$2" = "" ]; then dir="up"; else dir="$2"; fi
+	echo "tasks/"$1"/score/"$dir
+}
+query() { 
+	if [ ! "$3" = "" ]; then
+	curl https://habitica.com/api/v3/$1 -s -X $2 --compressed \
+	    -H "Content-Type:application/json" \
+	    -H "x-api-user: $USERID" \
+	    -H "x-api-key: $KEY" \
+	    -H "x-client: $USERID-$NAME-$VER" \
+	    -d "$3"
+	else
+	curl https://habitica.com/api/v3/$1 -s -X $2 --compressed \
+	    -H "Content-Type:application/json" \
+	    -H "x-api-user: $USERID" \
+	    -H "x-api-key: $KEY" \
+	    -H "x-client: $USERID-$NAME-$VER"
+	fi
+}
+displayResponse() {
+	if [ ! "$1" = "" ]; then
+		if [ "$1" = "daily" ]; then
+			itemgotten="$(cat $HOME/.cache/hcli/cached_dailysSet_response| jq '.data._tmp.drop.dialog')"
+			[ ! "$itemgotten" = "null" ] && echo $itemgotten
+			echo "You xp is now $(cat $HOME/.cache/hcli/cached_dailysSet_response| jq '.data.exp')"
+		elif [ "$1" = "habit" ]; then
+			itemgotten="$(cat $HOME/.cache/hcli/cached_habitsSet_response| jq '.data._tmp.drop.dialog')"
+			[ ! "$itemgotten" = "null" ] && echo $itemgotten
+			echo "You xp is now $(cat $HOME/.cache/hcli/cached_habitsSet_response| jq '.data.exp')"
+		elif [ "$1" = "purchase" ]; then
+			itemgotten="$(cat $HOME/.cache/hcli/cached_purchase_response | jq '.data._tmp.drop.dialog')"
+			[ ! "$itemgotten" = "null" ] && echo $itemgotten
+			echo purchased!
+		elif [ "$1" = "cast" ]; then
+			newMP="$(cat $HOME/.cache/hcli/cached_castSpellSet_response | jq '.data.user.stats.mp')"
+			if [ "$2" = "" ]; then echo "Missing argument" && exit;fi
+			echo "Used $2 mana, new mana balance is $newMP"
+		elif [ "$1" = "TaskAdd" ]; then
+			r="$(cat $HOME/.cache/hcli/cached_addTaskRewardResponse | jq '.data | .')"
+			echo "Added task successfuly"
+		fi
+	fi
+		
+}
+parseCache() {
+	if [ "$1" = "daily" ]; then
+		[ ! -f "$HOME/.cache/hcli/cached_dailys" ] && query `makeTaskq dailys` "GET" > $HOME/.cache/hcli/cached_dailys
+		[ ! -f "$HOME/.cache/hcli/parsed_dailys" ] && touch $HOME/.cache/hcli/parsed_dailys
+		cache=`cat $HOME/.cache/hcli/cached_dailys`
+		count=`echo $cache | jq '.data' | jq length`
+		
+		n=0
+		while [ "$n" -lt "$count" ]; do
+			echo $cache | jq ".data[$n] | .text,.isDue,.completed,.id,.streak" | tr '\n' '~' >> $HOME/.cache/hcli/parsed_dailys
+			echo >> $HOME/.cache/hcli/parsed_dailys
+		    n=$(( n + 1 ))
+		done
+	elif [ "$1" = "inventory" ]; then
+		[ ! -f "$HOME/.cache/hcli/cached_items" ] && query $itemsq "GET" > $HOME/.cache/hcli/cached_items
+		itemscache=`cat $HOME/.cache/hcli/cached_items`
+		[ ! -f "$HOME/.cache/hcli/cached_content" ] && query $contentq "GET" > $HOME/.cache/hcli/cached_content
+		[ ! -f "$HOME/.cache/hcli/parsed_content" ] && touch $HOME/.cache/hcli/parsed_content
+		if [ "$1" = "" ]; then exit;else class="$1";fi
+		contentcache=`cat $HOME/.cache/hcli/cached_content`
+		items="$(echo $itemscache | jq '.data.items.gear.equipped | .armor,.head,.shield,.weapon' | sed 's/"//g')"
+		itemhead=''
+		itembody=''
+		itemshield=''
+		itemweapon=''
+		n=0
+		for l in ${items[@]}; do
+			[ $n = 0 ] && itembody=$l	
+			[ $n = 1 ] && itemhead=$l	
+			[ $n = 2 ] && itemshield=$l	
+			[ $n = 3 ] && itemweapon=$l	
+			n=$(( n + 1 ))
+		done
+		body="$(echo $contentcache | jq ".data.gear.flat.$itembody | .str,.con,.int,.per,.klass" | sed 's/"//g' | tr '\n' '~')"
+		head="$(echo $contentcache | jq ".data.gear.flat.$itemhead | .str,.con,.int,.per,.klass" | sed 's/"//g' | tr '\n' '~')"
+		shield="$(echo $contentcache | jq ".data.gear.flat.$itemshield | .str,.con,.int,.per,.klass" | sed 's/"//g' | tr '\n' '~')"
+		weapon="$(echo $contentcache | jq ".data.gear.flat.$itemweapon | .str,.con,.int,.per,.klass" | sed 's/"//g' | tr '\n' '~')"
+		echo $body >> $HOME/.cache/hcli/parsed_content
+		echo $head >> $HOME/.cache/hcli/parsed_content
+		echo $shield >> $HOME/.cache/hcli/parsed_content
+		echo $weapon >> $HOME/.cache/hcli/parsed_content
+	elif [ "$1" = "user" ]; then
+		[ ! -f "$HOME/.cache/hcli/cached_user" ] && query `userq '?userFields=stats'` "GET" > $HOME/.cache/hcli/cached_user
+		[ ! -f "$HOME/.cache/hcli/parsed_user" ] && touch $HOME/.cache/hcli/parsed_user
+		cache=`cat $HOME/.cache/hcli/cached_user`
+		#1: hp, 2: mp, 3: GP, 4: lvl, 5: class, 6: xp, 7: username, 8: str buffs, 9: int buffs, 10: per buffs, 11: con buffs, 12: str, 13: con, 14: int, 15: per
+		userdata="$(echo $cache | jq '.data | .stats.hp, .stats.mp, .stats.gp, .stats.lvl, .stats.class, .stats.exp, .auth.local.username, .stats.buffs.str, .stats.buffs.int, .stats.buffs.per, .stats.buffs.con, .stats.str, .stats.con, .stats.int, .stats.per' | sed 's/^\([0-9][0-9]\)\..*/\1/ ; s/"//g' |tr '\n' '~')"
+		echo $userdata > $HOME/.cache/hcli/parsed_user
+	elif [ "$1" = "todo" ]; then
+		[ ! -f "$HOME/.cache/hcli/cached_todos" ] && query `makeTaskq todos` "GET" > $HOME/.cache/hcli/cached_todos
+		[ ! -f "$HOME/.cache/hcli/parsed_todo" ] && touch $HOME/.cache/hcli/parsed_todo	
+		cache=`cat $HOME/.cache/hcli/cached_todos`
+		count=`echo $cache | jq '.data' | jq length`
+		tasks=()
+		
+		n=0
+		while [ "$n" -lt "$count" ]; do
+			echo $cache | jq ".data[$n] | .text,.id" | tr '\n' '~' >> $HOME/.cache/hcli/parsed_todo
+			echo >> $HOME/.cache/hcli/parsed_todo
+		    n=$(( n + 1 ))
+		done
+	elif [ "$1" = "habit" ]; then
+		[ ! -f "$HOME/.cache/hcli/cached_habits" ] && query `makeTaskq habits` "GET" > $HOME/.cache/hcli/cached_habits
+		[ ! -f "$HOME/.cache/hcli/parsed_habit" ] && touch $HOME/.cache/hcli/parsed_habit	
+		cache=`cat $HOME/.cache/hcli/cached_habits`
+		count=`echo $cache | jq '.data' | jq length`
+		
+		n=0
+		while [ "$n" -lt "$count" ]; do
+			echo $cache | jq ".data[$n] | .text,.up,.down,.counterUp,.counterDown,.id" | tr '\n' '~' >> $HOME/.cache/hcli/parsed_habit
+			echo >> $HOME/.cache/hcli/parsed_habit
+		    n=$(( n + 1 ))
+		done
+	elif [ "$1" = "shop" ]; then
+		[ ! -f "$HOME/.cache/hcli/cached_shop" ] && query `userq '/in-app-rewards'` "GET" > $HOME/.cache/hcli/cached_shop
+		[ ! -f "$HOME/.cache/hcli/parsed_shop" ] && touch $HOME/.cache/hcli/parsed_shop	
+		[ ! -f "$HOME/.cache/hcli/cached_rewards" ] && query `makeTaskq rewards` "GET" > $HOME/.cache/hcli/cached_rewards
+		[ ! -f "$HOME/.cache/hcli/parsed_rewards" ] && touch $HOME/.cache/hcli/parsed_rewards	
+		[ ! -f "$HOME/.cache/hcli/parsed_finalshop" ] && touch $HOME/.cache/hcli/parsed_finalshop
+		shop_count=`cat $HOME/.cache/hcli/cached_shop | jq '.data' | jq length`
+		shop_cache="$(cat $HOME/.cache/hcli/cached_shop | jq '.data[]')"
+		shopi=()
+		rewards_cache="$(cat $HOME/.cache/hcli/cached_rewards | jq '.data[0] | .text,.value,.id' | tr '\n' '~' )"
+		rewards=()
+	
+		shop="$(echo $shop_cache | jq '. | [(.text + "~" + (.value|tostring) + "~" + .key + "#@#" )][]')
+	"
+		echo $shop$rewards_cache | sed 's/" "//g ; s/"//g ; s/#@#/\n/g' > $HOME/.cache/hcli/parsed_finalshop
+	fi
+}
+calcInventoryStats(){
+	gear=( $(cat $HOME/.cache/hcli/parsed_content) ) 
+	class=$1
+	tstr=0
+	tcon=0
+	tint=0
+	tper=0
+	for l in ${gear[@]}; do
+		if [ "$(echo $l | awk 'BEGIN { FS = "~" } ; { print $5 }')" = "$class" ]; then
+			str="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 }')"
+			bstr="$(echo $str / 2 | bc)"
+			str=$(( str + bstr ))
+			con="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+			bcon="$(echo $con / 2 | bc)"
+			con=$(( con + bcon ))
+			int="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $3 }')"
+			bint="$(echo $int / 2 | bc)"
+			int=$(( int + bint ))
+			per="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $4 }')"
+			bper="$(echo $per / 2 | bc)"
+			per=$(( per + bper ))
+		else
+			str="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 }')"
+			con="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+			int="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $3 }')"
+			per="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $4 }')"
+		fi
+		tstr=$(( tstr +  str ))
+		tcon=$(( tcon +  con ))
+		tint=$(( tint +  int ))
+		tper=$(( tper +  per ))
+	done
+	echo $tstr~$tcon~$tint~$tper~
+}
+displayDailys(){
+	if [ "$1" = "-i" ];then
+		ids=0 && all=0
+	elif [ "$1" = "-I" ]; then
+		ids=0 && all=1
+	elif [ "$1" = "-a" ]; then
+		ids=1 && all=0
+	else
+		ids=1 && all=1
+	fi
+	IFS=$'\n'
+	tasks=($(cat $HOME/.cache/hcli/parsed_dailys))
+	ttc=0
+	for l in ${tasks[@]}; do
+		statdone="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $3 }')"
+		statdue="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+		stat="$statdone$statdue"
+		if [ $all = 1 ]; then
+			if [ $ids = 0 ]; then
+				if [ "$stat" = "falsetrue" ];then
+					echo $l | awk 'BEGIN { FS = "~" } ; { print $1 "~"$4 "~daily~" $5}' | sed 's/"//g'
+					ttc=$(( ttc + 1))
+				fi
+			else
+				if [ "$stat" = "falsetrue" ];then
+					echo -e '\033[0;31m'`echo $l | awk -v v=$ST 'BEGIN { FS = "~" } ; { print $1 "    v" $5}' | sed 's/"//g'`'\033[0m'
+					ttc=$(( ttc + 1))
+				fi
+			fi
+		elif [ $all = 0 ]; then
+			if [ $ids = 0 ]; then
+				echo $l | awk 'BEGIN { FS = "~" } ; { print $1 "~"$4 "~daily~" $5}' | sed 's/"//g'
+				ttc=$(( ttc + 1))
+			else
+				if [ "$stat" = "falsetrue" ];then
+					echo -e '\033[0;31m'`echo $l | awk -v v=$ST 'BEGIN { FS = "~" } ; { print $1 "    "v$5}' | sed 's/"//g'`'\033[0m'
+					ttc=$(( ttc + 1))
+				elif [ "$stat" = "falsefalse" ];then
+					echo -e '\033[1;33m'`echo $l | awk -v v=$ST 'BEGIN { FS = "~" } ; { print $1 "    "v$5}' | sed 's/"//g'`'\033[0m'
+					ttc=$(( ttc + 1))
+				elif [ "$stat" = "truefalse" ];then
+					echo -e '\033[0;32m'`echo $l | awk -v v=$ST 'BEGIN { FS = "~" } ; { print $1 "    "v$5}' | sed 's/"//g'`'\033[0m'
+					ttc=$(( ttc + 1))
+				elif [ "$stat" = "truetrue" ];then
+					echo -e '\033[0;32m'`echo $l | awk -v v=$ST 'BEGIN { FS = "~" } ; { print $1 "    "v$5}' | sed 's/"//g'`'\033[0m'
+					ttc=$(( ttc + 1))
+				fi
+			fi
+		fi
+	done
+	if [ $ttc = 0 ];then if [ $all = 1 ];then echo "All done!";fi;fi
+}
+displayUser(){
+	userdata="$(cat $HOME/.cache/hcli/parsed_user)"
+	#echo $userdata | awk 'BEGIN { FS = "~" } ; { print $8"+"$12"="$8+$12"\n"};'
+	#LVL STATS
+	lvl="$(echo $userdata | awk 'BEGIN { FS = "~" } ; { print $4}')"
+	rawlvlstat="$(echo `echo $userdata | awk 'BEGIN { FS = "~" } ; { print $4 }'` / 2 | bc)"
+	#PREFIX OF LVL (ex lvl is 50, 5)
+	unitst="$(printf "%.0f\n" "$rawlvlstat" | sed -n 's/^[0-9]*\([0-9]\)$/\1/p')"
+	#SUFFIX OF LVL (ex lvl is 50, 5)
+	prlvlst="$(printf "%.0f\n" "$rawlvlstat" | sed -n 's/^\([0-9]*\)[0-9]$/\1/p')"
+	#PREFIX+SUFFIX
+	levelstats=`echo $prlvlst$unitst`
+	#echo LVLSTT $levelstats
+
+	
+	#STATS OF ARMOR (INCLUDING CLASS BONUS
+	armorstats=`calcInventoryStats "$(echo $userdata | awk 'BEGIN { FS = "~" } ; { print $5 }' | sed 's/"//g')"`
+
+	#ARMOR + RAW (class)
+	extstats=`addstats $armorstats "$levelstats~$levelstats~$levelstats~$levelstats~"`
+	#MAX XP
+	if [ "$lvl" -lt "5" ]; then
+		maxxp="$(echo "$lvl * 25" | bc)"
+	elif [ $lvl = 5 ]; then maxxp=150;
+	else
+		rawmaxxp="$(echo "0.25 * ( $lvl * $lvl ) + ( $lvl * 10 ) + 139.75" | bc)"
+		unit="$(echo $rawmaxxp | sed -n 's/^\([0-9]\+\)\.[0-9]\+$/\1/g;s/^[0-9]*\([0-9]\)$/\1/p')"
+		prlvl="$(printf "%.0f\n" "$rawmaxxp" | sed -n 's/^\([0-9]*\)[0-9]$/\1/p')"
+		if [ ! $unit -lt 5 ]; then unit=0 ; prlvl=$(( prlvl + 1 )) ;else unit=0;fi
+		maxxp=`echo $prlvl$unit`
+	fi
+
+	#MAX MP
+	extint="$(echo $extstats | awk 'BEGIN { FS = "~" } ; { print $3 }')"
+	maxmp="$(echo $userdata | awk -v ei=$extint 'BEGIN { FS = "~" } ; { print 2*($9+$14+ei)+30}')"
+
+
+	if [ "$1" = "A" ]; then
+		extstr="$(echo $extstats | awk 'BEGIN { FS = "~" } ; { print $1 }')"
+		extcon="$(echo $extstats | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+		extper="$(echo $extstats | awk 'BEGIN { FS = "~" } ; { print $4 }')"
+		gp=`echo $userdata | awk 'BEGIN { FS = "~" } ; { print $3 }' | sed 's/^\([0-9]\+\)\.[0-9]\+$/\1/g'`
+		echo "$userdata" | awk -v gold=$gp -v mxp=$maxxp -v mmp=$maxmp -v es=$extstr -v ec=$extcon -v ei=$extint -v ep=$extper 'BEGIN { FS = "~" } ; { print "\n"$7" (Lvl "$4","$5")\n\nHP: " $1 " / 50\nXP: " $6" / "mxp"\nMP: " int( $2 ) " / "mmp"\nGP: "gold"\n\nSTR: "$12+$8+es" | CON: "$11+$13+ec" | INT: "$9+$14+ei" | PER: "$10+$15+ep}'
+	else
+		echo "$userdata" | awk -v mxp=$maxxp -v mmp=$maxmp -v es=$extstr -v ec=$extcon -v ei=$extint -v ep=$extper 'BEGIN { FS = "~" } ; { print "\n"$7" (Lvl "$4","$5")\n\nHP: " $1 " / 50\nXP: " $6" / "mxp"\nMP: " int($2) " / "mmp"\nGP: " $3}'
+	fi
+}
+displayTodos(){
+	IFS=$'\n'
+	tasks=( $(cat $HOME/.cache/hcli/parsed_todo) ) 
+	ttc=0
+	for l in "${tasks[@]}"; do
+		if [ "$1" = "-i" ]; then
+			echo $l'todo' | awk 'BEGIN { FS = "~" } ; { print $1"~"$2"~\""$3}' | sed 's/^"//g ; s/"$// ; s/\\//g ; s/"~"/~/g'
+		else
+			echo $l | awk 'BEGIN { FS = "~" } ; { print "*	"$1}' | sed 's/"//g ; s/\\//g'
+		fi
+		ttc=$(( ttc + 1))
+	done
+	if [ $ttc = 0 ];then echo "No Todos.";fi
+	
+}
+displayHabits(){
+	IFS=$'\n'
+	tasks=( $(cat $HOME/.cache/hcli/parsed_habit) )
+	ttc=0
+	
+	for l in "${tasks[@]}"; do
+		isDown="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+		isUp="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $3 }')"
+		isStat=$isDown$isUp
+		if [ ! "$1" = "-i" ]; then
+			if [ "$isStat" = "truetrue" ]; then
+				echo -e `echo $l | awk 'BEGIN { FS = "~" } ; { print "\033[1;33m"$4"  |  "$5"	\033[0m"$1}' | sed 's/"//g'`
+			elif [ "$isStat" = "falsetrue" ]; then
+				echo -e `echo $l | awk 'BEGIN { FS = "~" } ; { print "\033[0;31m"$5"	\033[0m"$1}' | sed 's/"//g'`
+			elif [ "$isStat" = "truefalse" ]; then
+				echo -e `echo $l | awk 'BEGIN { FS = "~" } ; { print "\033[0;32m"$4"	\033[0m"$1}' | sed 's/"//g'`
+			fi
+		else
+			echo $l | awk 'BEGIN { FS = "~" } ; { print $1"~"$6"~habit"}' | sed 's/"//g'
+		fi
+		ttc=$(( ttc + 1))
+	done
+	if [ $ttc = 0 ];then echo "No habits.";fi
+	
+}
+score() {
+	if [ "$1" = "dailys" ]; then
+		tasks=`displayDailys -I`
+		name=()
+		items=()
+		IFS=
+		for l in $tasks; do
+			items+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 "~" $2 "~" $3}' | sed 's/"//g')"
+			name+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 }' | sed 's/"//g')"
+		done
+		IFS=' '
+		toget="$(echo $name | fzf)"
+		[ "$toget" = "" ] && echo Canceled && exit 0
+		id="$(echo $items | grep "$(echo $toget | sed 's/\[/\\\[/')" | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+		query `makeScoreq "$id"` "POST" > $HOME/.cache/hcli/cached_dailysSet_response
+		displayResponse daily
+		refresh daily
+	elif [ "$1" = "habits" ]; then
+		tasks=`displayHabits -i`
+		name=()
+		items=()
+		IFS=
+		for l in $tasks; do
+			items+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 "~" $2 }' | sed 's/"//g')"
+			name+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 }' | sed 's/"//g')"
+		done
+		IFS=' '
+		toget="$(echo $name | fzf)"
+		[ "$toget" = "" ] && echo Canceled && exit 0
+		toget="$(echo $toget | sed 's/\[/\\\[/ ; s/\]/\\\]/')"
+		id="$(echo $items | grep "$toget" | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+		read -p "(u)p/(d)own: " dir
+		[ "$dir" = "u" ] && dir="up"
+		[ "$dir" = "d" ] && dir="down"
+		query `makeScoreq "$id" "$dir"` "POST" > $HOME/.cache/hcli/cached_habitsSet_response
+		displayResponse habit
+		refresh habit -q
+	elif [ "$1" = "todos" ]; then
+		tasks=`displayTodos -i`
+		name=()
+		items=()
+		IFS=
+		for l in $tasks; do
+			items+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 "~" $2 }' | sed 's/"//g')"
+			name+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 }' | sed 's/"//g')"
+		done
+		IFS=' '
+		toget="$(echo $name | fzf)"
+		[ "$toget" = "" ] && echo Canceled && exit 0
+		toget="$(echo $toget | sed 's/\[/\\\[/ ; s/\]/\\\]/')"
+		id="$(echo $items | grep "$toget" | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+		dir="up"
+		query `makeScoreq "$id" "$dir"` "POST" > $HOME/.cache/hcli/cached_habitsSet_response
+		displayResponse habit
+		refresh todo -q
+	fi
+}
+castSkill() {
+	class=`cat $HOME/.cache/hcli/parsed_user | awk 'BEGIN { FS="~" } ; { print $5 }'`
+	skills=()
+	IFS=
+	case $class in
+		warrior)
+			skills=( $'smash~Brutal Smash~0~10\ndefensiveStance~Defensive Stance~1~25\nvalorousPresence~Valorous Presence~1~20\nintimidate~Intimidating Gaze~1~15' );;
+		mage)
+			skills=( $'fireball~Burst of Flames~0~10\nmpheal~Ethereal Surge~1~30\nearth~Earthquake~1~35\nfrost~Chilling Frost~1~40' );;
+		healer)
+			skills=( $'heal~Healing Light~1~15\nprotectAura~Protective Aura~1~30\nbrightness~Searing Brightness~1~15\nhealAll~Blessing~1~25' );;
+		rogue)
+			skills=( $'pickPocket~Pickpocket~1~10\nbackStab~Backstab~1~15\ntoolsOfTrade~Tools of the Trade~1~25\nstealth~Stealth~0~45' );;
+	esac
+	name=""
+	for l in $skills; do
+		name+="$( echo $skills | awk 'BEGIN { FS="~" } ; { print $2 }')"
+	done
+	chosenName="$(echo "$name" | fzf)"
+	chosen=`echo $skills | grep "$chosenName" | awk 'BEGIN { FS="~" } ; { print $1"~"$3"~"$4 }'`
+	id=` echo "$chosen" | awk 'BEGIN { FS="~" } ; { print $1 }'`
+	isTargetted=` echo "$chosen" | awk 'BEGIN { FS="~" } ; { print $2 }'`
+	cost=` echo "$chosen" | awk 'BEGIN { FS="~" } ; { print $3 }'`
+	if [ $isTargetted = 0 ]; then
+		tid=`GetTargetId | awk 'BEGIN { FS = "~" } ; { print $1 }'`
+		query `makeCastSpellq "$id" "$tid"` "POST" > $HOME/.cache/hcli/cached_castSpellSet_response; displayResponse cast "$cost"
+	else query `makeCastSpellq "$id"` "POST" > $HOME/.cache/hcli/cached_castSpellSet_response; displayResponse cast "$cost"
+	fi
+	refresh user
+}
+addTask() {
+	t="Nil"
+	if [ "$1" = "" ]; then echo NO ARGS && exit;
+	elif [ "$1" = "t" ]; then t="todo";
+	elif [ "$1" = "h" ]; then t="habit";
+	elif [ "$1" = "d" ]; then t="daily";
+	elif [ "$1" = "r" ]; then t="reward";
+	fi
+	if [ "$2" = "e" ]; then extra=0;else extra=1;fi
+	read -p "Name: " n
+	#echo $n $t $extra
+	if [ $extra = 0 ];then
+		#difficulty / Reward cost
+		[ ! $t = "reward" ] && read -p "difficulty (trival=0,easy=1,medium=2,hard=3) : " d
+		[ $t = "reward" ] && read -p "Amount : " a
+		if [ "$d" = "0" ]; then d="0.1";
+		elif [ "$d" = "2" ]; then d="1.5";
+		elif [ "$d" = "3" ]; then d="2";
+		fi
+
+		#setting data
+		[ ! $t = "reward" ] && data="{\"text\": \"$n\",\"type\": \"$t\",\"priority\": $d}" || data="{\"text\": \"$n\",\"type\": \"$t\",\"value\": $a}"
+		#sending data
+		query $addtaskq "POST" "$data" > $HOME/.cache/hcli/cached_addTaskRewardResponse
+		displayResponse TaskAdd
+	else
+		#sending data
+		data="{\"text\": \"$n\",\"type\": \"$t\"}"
+		query $addtaskq "POST" "$data" > $HOME/.cache/hcli/cached_addTaskRewardResponse
+		displayResponse TaskAdd
+	fi
+	refresh $t
+}
+buyThings(){
+	finalcache="$(cat $HOME/.cache/hcli/parsed_finalshop)"	
+
+	IFS=
+	items=()
+	name=()
+	ttc=0
+	for l in ${finalcache[@]}; do
+		items+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 "~" $3 }' | sed 's/"//g')"
+		name+="$(echo $l | awk 'BEGIN { FS = "~" } ; { print $1 "\t" $2 "GP" }' | sed 's/"//g')"
+		ttc=$(( ttc + 1))
+	done
+	if [ $ttc = 0 ];then echo "No habits.";fi
+	#echo $items
+	#echo $name
+	toget="$(echo $name | fzf)"
+	[ "$toget" = "" ] && echo Canceled && exit 0
+	toget="$(echo $toget | sed 's/\[/\\\[/ ; s/\]/\\\]/')"
+	id="$(echo $items | grep "$(echo $toget | awk 'BEGING { FS = "\t" } {print $1}')" | awk 'BEGIN { FS = "~" } ; { print $2 }')"
+	#echo $toget
+	query `makeScoreq "$id"` "POST" > $HOME/.cache/hcli/cached_purchase_response
+	displayResponse purchase
+}
+
+
+parseArgs(){
+	refreshbefore=1
+	dailys=1
+	adddaily=1
+	habits=1
+	addhabit=1
+	dailysAll=1
+	habits=1
+	todos=1
+	addtodo=1
+	addreward=1
+	user=1
+	user_detailed=1
+	score=1
+	summary=1
+	cast=1
+	extra=1
+	buy=1
+	delete=1
+	allocate=1
+	cron=1
+	if [ ! "$1" = "" ]; then
+		for (( i=0; i<${#1}; i++ )); do
+			if [ $i = 0 ]; then
+				if [ ! "${1:$i:1}" = "-" ]; then echo "Invalid Argument"; fi
+			elif [ "${1:$i:1}" = "r" ]; then refreshbefore=0;
+			elif [ "${1:$i:1}" = "a" ]; then dailysAll=0;
+			elif [ "${1:$i:1}" = "u" ]; then user=0;
+			elif [ "${1:$i:1}" = "U" ]; then user_detailed=0;
+			elif [ "${1:$i:1}" = "d" ]; then dailys=0;
+			elif [ "${1:$i:1}" = "D" ]; then adddaily=0;
+			elif [ "${1:$i:1}" = "s" ]; then score=0;
+			elif [ "${1:$i:1}" = "h" ]; then habits=0;
+			elif [ "${1:$i:1}" = "H" ]; then addhabit=0;
+			elif [ "${1:$i:1}" = "t" ]; then todos=0;
+			elif [ "${1:$i:1}" = "T" ]; then addtodo=0;
+			elif [ "${1:$i:1}" = "p" ]; then addreward=0;
+			elif [ "${1:$i:1}" = "c" ]; then cast=0;
+			elif [ "${1:$i:1}" = "C" ]; then cron=0;
+			elif [ "${1:$i:1}" = "E" ]; then extra=0;
+			elif [ "${1:$i:1}" = "b" ]; then buy=0;
+			elif [ "${1:$i:1}" = "x" ]; then delete=0;
+			elif [ "${1:$i:1}" = "q" ]; then allocate=0;
+			fi
+		done
+	else summary=0; fi
+	if [ "$1" = "-r" ]; then
+		summary=0
+	fi
+	if [ ! $summary = 0 ]; then
+		if [ $user = 0 ]; then
+			[ $refreshbefore = 0 ] && refresh user
+			displayUser
+		fi
+		if [ $cron = 0 ]; then
+			query $cronq "POST" > /dev/null && echo cronned! && refresh daily && refresh user -q && refresh habit -q && refresh todo -q && refresh reward -q
+		fi
+		if [ $user_detailed = 0 ]; then
+			[ $refreshbefore = 0 ] && refresh user
+			displayUser A
+		fi
+		if [ $allocate = 0 ]; then
+			allocateStats
+		fi
+		if [ $delete = 0 ]; then
+			deleteTask
+		fi
+		if [ $cast = 0 ]; then
+			castSkill
+		fi
+		if [ $dailysAll = 0 ]; then 
+			[ $refreshbefore = 0 ] && refresh daily
+			displayDailys -a
+		fi
+		if [ $dailys = 0 ]; then
+			[ $refreshbefore = 0 ] && refresh daily
+			[ $score = 0 ] && score dailys || displayDailys
+		fi
+		if [ $buy = 0 ]; then
+			buyThings
+		fi
+		if [ $adddaily = 0 ]; then
+			[ $refreshbefore = 0 ] && refresh daily
+			[ $extra = 0 ] && addTask d e || addTask d
+		fi
+		if [ $habits = 0 ]; then
+			[ $refreshbefore = 0 ] && refresh habit
+			[ $score = 0 ] && score habits || displayHabits
+		fi
+		if [ $addhabit = 0 ]; then
+			[ $refreshbefore = 0 ] && refresh habit
+			[ $extra = 0 ] && addTask h e || addTask h
+		fi
+		if [ $todos = 0 ]; then
+			[ $refreshbefore = 0 ] && refresh todo
+			[ $score = 0 ] && score todos || displayTodos
+		fi
+		if [ $addtodo = 0 ]; then
+			[ $refreshbefore = 0 ] && refresh todo
+			[ $extra = 0 ] && addTask t e || addTask t
+		fi
+		if [ $addreward = 0 ]; then
+			[ $extra = 0 ] && addTask r e || addTask r
+		fi
+	else
+		[ $refreshbefore = 0 ] && refresh daily && refresh user -q && refresh habit -q && refresh todo -q && refresh reward -q
+		summary
+	fi
+}
+
+if [ "$1" == "--init" ]; then
+	hcliInit
+else
+	
+	parseArgs $1
+fi
