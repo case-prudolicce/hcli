@@ -1,5 +1,5 @@
 install:
-	sudo cp ./hCLI.sh /usr/bin/hcli 
+	sudo cp ./hcli /usr/bin/hcli 
 	sudo cp ./hcli.1.gz /usr/share/man/man1/
 
 uninstall:
