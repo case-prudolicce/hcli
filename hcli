@@ -1,3 +1,4 @@
+#!/bin/sh
 #HCLI: A cli based API wrapper for https://habitica.com
 #Made by Jérémie Simard
 
